@@ -2,1226 +2,195 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime
 
-# =========================
-# 页面设置
-# =========================
-st.set_page_config(
-    page_title="美股量化交易系统 PRO",
-    page_icon="📈",
-    layout="wide"
-)
+st.set_page_config(page_title="美股量化系统 PRO V2", page_icon="📈", layout="wide")
+st.title("📈 美股量化交易系统 PRO V2")
+st.caption("5m执行｜15m确认｜60m趋势｜SPY/QQQ过滤｜量价+动能+结构+风控")
 
-st.title("📈 美股量化交易系统 PRO")
-st.caption("5分钟执行｜15分钟确认｜60分钟趋势｜量价 + 动能 + 风控")
+def ema(s,n): return s.ewm(span=n, adjust=False).mean()
 
-# =========================
-# CSS 手机优化
-# =========================
-st.markdown("""
-<style>
-.block-container {
-    padding-top: 1rem;
-    padding-bottom: 2rem;
-}
-div[data-testid="stMetric"] {
-    background: rgba(128,128,128,0.08);
-    border: 1px solid rgba(128,128,128,0.20);
-    padding: 12px;
-    border-radius: 12px;
-}
-</style>
-""", unsafe_allow_html=True)
+def rsi(s,n=14):
+    d=s.diff(); up=d.clip(lower=0).rolling(n).mean(); dn=(-d.clip(upper=0)).rolling(n).mean()
+    rs=up/dn.replace(0,np.nan)
+    return 100-100/(1+rs)
 
-# =========================
-# 技术指标
-# =========================
-
-def ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def rsi(series, period=14):
-    delta = series.diff()
-
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    return 100 - (100 / (1 + rs))
-
-
-def atr(df, period=14):
-    prev_close = df["Close"].shift(1)
-
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - prev_close).abs(),
-        (df["Low"] - prev_close).abs()
-    ], axis=1).max(axis=1)
-
-    return tr.rolling(period).mean()
-
-
-def adx(df, period=14):
-
-    up_move = df["High"].diff()
-    down_move = -df["Low"].diff()
-
-    plus_dm = np.where(
-        (up_move > down_move) & (up_move > 0),
-        up_move,
-        0
-    )
-
-    minus_dm = np.where(
-        (down_move > up_move) & (down_move > 0),
-        down_move,
-        0
-    )
-
-    atr_val = atr(df, period)
-
-    plus_di = (
-        100 *
-        pd.Series(plus_dm, index=df.index).rolling(period).mean()
-        / atr_val
-    )
-
-    minus_di = (
-        100 *
-        pd.Series(minus_dm, index=df.index).rolling(period).mean()
-        / atr_val
-    )
-
-    dx = (
-        100 *
-        (plus_di - minus_di).abs()
-        /
-        (plus_di + minus_di).replace(0, np.nan)
-    )
-
-    adx_val = dx.rolling(period).mean()
-
-    return adx_val, plus_di, minus_di
-
-
-def obv(df):
-
-    direction = np.sign(df["Close"].diff()).fillna(0)
-
-    return (
-        direction * df["Volume"]
-    ).cumsum()
-
+def atr(df,n=14):
+    pc=df["Close"].shift(1)
+    tr=pd.concat([(df["High"]-df["Low"]),(df["High"]-pc).abs(),(df["Low"]-pc).abs()],axis=1).max(axis=1)
+    return tr.rolling(n).mean()
 
 def vwap(df):
-
-    typical_price = (
-        df["High"]
-        + df["Low"]
-        + df["Close"]
-    ) / 3
-
-    date_index = pd.Series(
-        df.index.date,
-        index=df.index
-    )
-
-    pv = typical_price * df["Volume"]
-
-    cumulative_pv = pv.groupby(date_index).cumsum()
-
-    cumulative_volume = (
-        df["Volume"]
-        .groupby(date_index)
-        .cumsum()
-        .replace(0, np.nan)
-    )
-
-    return cumulative_pv / cumulative_volume
-
-
-# =========================
-# 添加技术指标
-# =========================
+    tp=(df["High"]+df["Low"]+df["Close"])/3
+    day=pd.Series(df.index.date,index=df.index)
+    pv=tp*df["Volume"]
+    return pv.groupby(day).cumsum()/df["Volume"].groupby(day).cumsum().replace(0,np.nan)
 
 def add_indicators(df):
-
-    x = df.copy()
-
-    x["EMA20"] = ema(x["Close"], 20)
-    x["EMA60"] = ema(x["Close"], 60)
-
-    x["RSI"] = rsi(x["Close"])
-
-    x["ATR"] = atr(x)
-
-    x["VWAP"] = vwap(x)
-
-    fast = ema(x["Close"], 12)
-    slow = ema(x["Close"], 26)
-
-    x["MACD"] = fast - slow
-    x["MACD_SIGNAL"] = ema(x["MACD"], 9)
-    x["MACD_HIST"] = (
-        x["MACD"] - x["MACD_SIGNAL"]
-    )
-
-    adx_val, plus_di, minus_di = adx(x)
-
-    x["ADX"] = adx_val
-    x["PLUS_DI"] = plus_di
-    x["MINUS_DI"] = minus_di
-
-    x["OBV"] = obv(x)
-
-    x["VOL_AVG20"] = (
-        x["Volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    x["RVOL"] = (
-        x["Volume"]
-        /
-        x["VOL_AVG20"]
-        .replace(0, np.nan)
-    )
-
-    x["HIGH20"] = (
-        x["High"]
-        .shift(1)
-        .rolling(20)
-        .max()
-    )
-
-    x["LOW20"] = (
-        x["Low"]
-        .shift(1)
-        .rolling(20)
-        .min()
-    )
-
+    x=df.copy()
+    x["EMA20"]=ema(x["Close"],20); x["EMA60"]=ema(x["Close"],60)
+    x["RSI"]=rsi(x["Close"]); x["ATR"]=atr(x); x["VWAP"]=vwap(x)
+    macd=ema(x["Close"],12)-ema(x["Close"],26); x["MACD_H"]=macd-ema(macd,9)
+    x["VOL20"]=x["Volume"].rolling(20).mean(); x["RVOL"]=x["Volume"]/x["VOL20"].replace(0,np.nan)
+    x["OBV"]=(np.sign(x["Close"].diff()).fillna(0)*x["Volume"]).cumsum()
+    x["HH20"]=x["High"].shift(1).rolling(20).max(); x["LL20"]=x["Low"].shift(1).rolling(20).min()
     return x
 
-
-# =========================
-# 周期重采样
-# =========================
-
-def resample_data(df, interval):
-
-    rule = {
-        "15m": "15min",
-        "60m": "60min"
-    }[interval]
-
-    x = df.resample(rule).agg({
-        "Open": "first",
-        "High": "max",
-        "Low": "min",
-        "Close": "last",
-        "Volume": "sum"
-    })
-
-    return x.dropna()
-
-
-# =========================
-# 趋势判断
-# =========================
+def resample_ohlcv(df,rule):
+    return df.resample(rule).agg(Open=("Open","first"),High=("High","max"),Low=("Low","min"),
+                                 Close=("Close","last"),Volume=("Volume","sum")).dropna()
 
 def trend_state(df):
-
-    if len(df) < 70:
-        return "NEUTRAL"
-
-    r = df.iloc[-1]
-
-    bull = (
-        r["Close"] > r["EMA20"]
-        and
-        r["EMA20"] > r["EMA60"]
-    )
-
-    bear = (
-        r["Close"] < r["EMA20"]
-        and
-        r["EMA20"] < r["EMA60"]
-    )
-
-    if bull:
-        return "BULL"
-
-    if bear:
-        return "BEAR"
-
+    if len(df)<65: return "NEUTRAL"
+    r=df.iloc[-1]
+    if r["Close"]>r["EMA20"]>r["EMA60"]: return "BULL"
+    if r["Close"]<r["EMA20"]<r["EMA60"]: return "BEAR"
     return "NEUTRAL"
 
-
-# =========================
-# 当前推动腿
-# =========================
-
-def detect_leg(df, side):
-
-    recent = df.tail(30)
-
-    if side == "LONG":
-
-        rolling_high = (
-            recent["High"]
-            .rolling(6)
-            .max()
-        )
-
-        pushes = (
-            recent["High"] >= rolling_high
-        ).sum()
-
-    else:
-
-        rolling_low = (
-            recent["Low"]
-            .rolling(6)
-            .min()
-        )
-
-        pushes = (
-            recent["Low"] <= rolling_low
-        ).sum()
-
-    if pushes >= 9:
-        return "THIRD_PUSH"
-
-    if pushes >= 6:
-        return "SECOND_PUSH"
-
-    return "FIRST_PUSH"
-
-
-# =========================
-# 行情下载
-# =========================
-
 @st.cache_data(ttl=60)
-def get_market_data(symbol):
+def load_symbol(symbol):
+    x=yf.download(symbol,period="30d",interval="5m",auto_adjust=True,prepost=False,progress=False,threads=False)
+    if x is None or x.empty: return None
+    if isinstance(x.columns,pd.MultiIndex): x.columns=x.columns.get_level_values(0)
+    need=["Open","High","Low","Close","Volume"]
+    return x[need].dropna() if all(c in x.columns for c in need) else None
 
-    data = yf.download(
-        symbol,
-        period="60d",
-        interval="5m",
-        progress=False,
-        auto_adjust=True,
-        prepost=False
-    )
+def market_bias():
+    out=[]
+    score=0
+    for sym in ["SPY","QQQ"]:
+        d=load_symbol(sym)
+        if d is None: continue
+        f=add_indicators(d); r=f.iloc[-1]
+        if r["Close"]>r["EMA20"] and r["Close"]>r["VWAP"]:
+            score+=1; out.append(f"{sym}偏多")
+        elif r["Close"]<r["EMA20"] and r["Close"]<r["VWAP"]:
+            score-=1; out.append(f"{sym}偏空")
+        else: out.append(f"{sym}中性")
+    bias="BULL" if score>=1 else "BEAR" if score<=-1 else "NEUTRAL"
+    return bias," / ".join(out)
 
-    if data is None or len(data) == 0:
-        return None
+def evaluate(df,mkt):
+    f5=add_indicators(df)
+    f15=add_indicators(resample_ohlcv(df,"15min"))
+    f60=add_indicators(resample_ohlcv(df,"60min"))
+    if min(len(f15),len(f60))<60: return None
+    r=f5.iloc[-1]; p=f5.iloc[-2]
+    t5,t15,t60=trend_state(f5),trend_state(f15),trend_state(f60)
+    L=S=0; lr=[]; sr=[]
 
-    # yfinance 有时返回 MultiIndex
-    if isinstance(data.columns, pd.MultiIndex):
+    if t60=="BULL": L+=18; lr.append("60m主趋势向上 +18")
+    elif t60=="BEAR": S+=18; sr.append("60m主趋势向下 +18")
+    if t15=="BULL": L+=12; lr.append("15m确认向上 +12")
+    elif t15=="BEAR": S+=12; sr.append("15m确认向下 +12")
 
-        data.columns = (
-            data.columns
-            .get_level_values(0)
-        )
+    if r["Close"]>r["EMA20"]>r["EMA60"]: L+=10; lr.append("5m EMA多头排列 +10")
+    elif r["Close"]<r["EMA20"]<r["EMA60"]: S+=10; sr.append("5m EMA空头排列 +10")
 
-    required = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume"
-    ]
+    if r["Close"]>r["VWAP"]: L+=8; lr.append("价格在VWAP上方 +8")
+    elif r["Close"]<r["VWAP"]: S+=8; sr.append("价格在VWAP下方 +8")
 
-    data = data[required]
+    if r["MACD_H"]>0 and r["MACD_H"]>p["MACD_H"]: L+=8; lr.append("MACD多头动能增强 +8")
+    elif r["MACD_H"]<0 and r["MACD_H"]<p["MACD_H"]: S+=8; sr.append("MACD空头动能增强 +8")
 
-    data = data.dropna()
+    if 52<=r["RSI"]<=72: L+=7; lr.append("RSI有效多头区 +7")
+    elif 28<=r["RSI"]<=48: S+=7; sr.append("RSI有效空头区 +7")
 
-    return data
+    if r["RVOL"]>=1.2:
+        if r["Close"]>r["Open"]: L+=8; lr.append(f"RVOL {r['RVOL']:.2f} 放量上涨 +8")
+        elif r["Close"]<r["Open"]: S+=8; sr.append(f"RVOL {r['RVOL']:.2f} 放量下跌 +8")
 
+    if f5["OBV"].iloc[-1]>f5["OBV"].iloc[-6]: L+=4; lr.append("OBV近端上行 +4")
+    elif f5["OBV"].iloc[-1]<f5["OBV"].iloc[-6]: S+=4; sr.append("OBV近端下行 +4")
 
-# =========================
-# 核心量化评分
-# =========================
+    if pd.notna(r["HH20"]) and r["Close"]>r["HH20"]: L+=10; lr.append("突破20根K线前高 +10")
+    if pd.notna(r["LL20"]) and r["Close"]<r["LL20"]: S+=10; sr.append("跌破20根K线前低 +10")
 
-def calculate_signal(df5):
+    if mkt=="BULL": L+=8; S-=5; lr.append("SPY/QQQ偏多 +8")
+    elif mkt=="BEAR": S+=8; L-=5; sr.append("SPY/QQQ偏空 +8")
 
-    if df5 is None or len(df5) < 150:
-        return None
+    if (t60=="BULL" and t15=="BEAR") or (t60=="BEAR" and t15=="BULL"): L-=10; S-=10
 
-    f5 = add_indicators(df5)
+    L=max(0,int(L)); S=max(0,int(S))
+    side="LONG" if L>S else "SHORT"
+    score=max(L,S); gap=abs(L-S)
 
-    df15 = resample_data(df5, "15m")
-    df60 = resample_data(df5, "60m")
+    if score>=85 and gap>=18: status="CONFIRMED"
+    elif score>=78 and gap>=12: status="WAIT_CONFIRM"
+    elif score>=65: status="WATCH"
+    else: status="NO_TRADE"
+    if gap<8: status="NO_TRADE"
 
-    f15 = add_indicators(df15)
-    f60 = add_indicators(df60)
-
-    if len(f15) < 70 or len(f60) < 70:
-        return None
-
-    row = f5.iloc[-1]
-    prev = f5.iloc[-2]
-
-    trend5 = trend_state(f5)
-    trend15 = trend_state(f15)
-    trend60 = trend_state(f60)
-
-    long_score = 0
-    short_score = 0
-
-    long_reasons = []
-    short_reasons = []
-
-    # =====================
-    # 60分钟趋势 20分
-    # =====================
-
-    if trend60 == "BULL":
-
-        long_score += 20
-        long_reasons.append(
-            "60分钟主趋势向上"
-        )
-
-    elif trend60 == "BEAR":
-
-        short_score += 20
-        short_reasons.append(
-            "60分钟主趋势向下"
-        )
-
-    # =====================
-    # 15分钟趋势 15分
-    # =====================
-
-    if trend15 == "BULL":
-
-        long_score += 15
-        long_reasons.append(
-            "15分钟趋势向上"
-        )
-
-    elif trend15 == "BEAR":
-
-        short_score += 15
-        short_reasons.append(
-            "15分钟趋势向下"
-        )
-
-    # =====================
-    # 5分钟 EMA 15分
-    # =====================
-
-    if (
-        row["Close"] > row["EMA20"]
-        and
-        row["EMA20"] > row["EMA60"]
-    ):
-
-        long_score += 15
-
-        long_reasons.append(
-            "5分钟 EMA20 > EMA60"
-        )
-
-    elif (
-        row["Close"] < row["EMA20"]
-        and
-        row["EMA20"] < row["EMA60"]
-    ):
-
-        short_score += 15
-
-        short_reasons.append(
-            "5分钟 EMA20 < EMA60"
-        )
-
-    # =====================
-    # VWAP 10分
-    # =====================
-
-    if row["Close"] > row["VWAP"]:
-
-        long_score += 10
-
-        long_reasons.append(
-            "价格位于 VWAP 上方"
-        )
-
+    entry=float(r["Close"]); a=float(r["ATR"])
+    if side=="LONG":
+        stop=min(float(f5["Low"].tail(8).min()),entry-1.35*a); risk=entry-stop
+        t1,t2,t3=entry+risk,entry+2*risk,entry+3*risk
     else:
-
-        short_score += 10
-
-        short_reasons.append(
-            "价格位于 VWAP 下方"
-        )
-
-    # =====================
-    # MACD 10分
-    # =====================
-
-    if (
-        row["MACD_HIST"] > 0
-        and
-        row["MACD_HIST"]
-        >
-        prev["MACD_HIST"]
-    ):
-
-        long_score += 10
-
-        long_reasons.append(
-            "MACD 多头动能增强"
-        )
-
-    elif (
-        row["MACD_HIST"] < 0
-        and
-        row["MACD_HIST"]
-        <
-        prev["MACD_HIST"]
-    ):
-
-        short_score += 10
-
-        short_reasons.append(
-            "MACD 空头动能增强"
-        )
-
-    # =====================
-    # RSI 10分
-    # =====================
-
-    if (
-        row["RSI"] >= 52
-        and
-        row["RSI"] <= 72
-    ):
-
-        long_score += 10
-
-        long_reasons.append(
-            "RSI 位于有效多头区域"
-        )
-
-    elif (
-        row["RSI"] >= 28
-        and
-        row["RSI"] <= 48
-    ):
-
-        short_score += 10
-
-        short_reasons.append(
-            "RSI 位于有效空头区域"
-        )
-
-    # =====================
-    # RVOL 成交量 10分
-    # =====================
-
-    if row["RVOL"] >= 1.2:
-
-        if row["Close"] > row["Open"]:
-
-            long_score += 10
-
-            long_reasons.append(
-                f"放量上涨 RVOL {row['RVOL']:.2f}"
-            )
-
-        else:
-
-            short_score += 10
-
-            short_reasons.append(
-                f"放量下跌 RVOL {row['RVOL']:.2f}"
-            )
-
-    # =====================
-    # OBV 5分
-    # =====================
-
-    obv_now = f5["OBV"].iloc[-1]
-    obv_old = f5["OBV"].iloc[-6]
-
-    if obv_now > obv_old:
-
-        long_score += 5
-
-        long_reasons.append(
-            "OBV 资金流向上"
-        )
-
-    elif obv_now < obv_old:
-
-        short_score += 5
-
-        short_reasons.append(
-            "OBV 资金流向下"
-        )
-
-    # =====================
-    # 突破 10分
-    # =====================
-
-    if row["Close"] > row["HIGH20"]:
-
-        long_score += 10
-
-        long_reasons.append(
-            "突破最近20根K线高点"
-        )
-
-    elif row["Close"] < row["LOW20"]:
-
-        short_score += 10
-
-        short_reasons.append(
-            "跌破最近20根K线低点"
-        )
-
-    # =====================
-    # ADX 趋势强度 5分
-    # =====================
-
-    if row["ADX"] >= 25:
-
-        if row["PLUS_DI"] > row["MINUS_DI"]:
-
-            long_score += 5
-
-            long_reasons.append(
-                "ADX趋势强且 +DI 占优"
-            )
-
-        else:
-
-            short_score += 5
-
-            short_reasons.append(
-                "ADX趋势强且 -DI 占优"
-            )
-
-    # =====================
-    # 周期冲突过滤
-    # =====================
-
-    if (
-        trend60 == "BULL"
-        and
-        trend15 == "BEAR"
-    ):
-
-        long_score -= 10
-        short_score -= 10
-
-    if (
-        trend60 == "BEAR"
-        and
-        trend15 == "BULL"
-    ):
-
-        long_score -= 10
-        short_score -= 10
-
-    # =====================
-    # 决定方向
-    # =====================
-
-    if max(long_score, short_score) < 65:
-
-        side = "WAIT"
-
-    elif long_score > short_score:
-
-        side = "LONG"
-
-    else:
-
-        side = "SHORT"
-
-    score = max(
-        long_score,
-        short_score
-    )
-
-    reasons = (
-        long_reasons
-        if side == "LONG"
-        else short_reasons
-    )
-
-    # =====================
-    # 风控
-    # =====================
-
-    entry = float(row["Close"])
-    atr_value = float(row["ATR"])
-
-    if side == "LONG":
-
-        recent_low = float(
-            f5["Low"]
-            .tail(8)
-            .min()
-        )
-
-        atr_stop = (
-            entry
-            -
-            1.35 * atr_value
-        )
-
-        stop = min(
-            recent_low,
-            atr_stop
-        )
-
-        risk = (
-            entry
-            -
-            stop
-        )
-
-        target1 = (
-            entry
-            +
-            risk
-        )
-
-        target2 = (
-            entry
-            +
-            risk * 2
-        )
-
-        target3 = (
-            entry
-            +
-            risk * 3
-        )
-
-    elif side == "SHORT":
-
-        recent_high = float(
-            f5["High"]
-            .tail(8)
-            .max()
-        )
-
-        atr_stop = (
-            entry
-            +
-            1.35 * atr_value
-        )
-
-        stop = max(
-            recent_high,
-            atr_stop
-        )
-
-        risk = (
-            stop
-            -
-            entry
-        )
-
-        target1 = (
-            entry
-            -
-            risk
-        )
-
-        target2 = (
-            entry
-            -
-            risk * 2
-        )
-
-        target3 = (
-            entry
-            -
-            risk * 3
-        )
-
-    else:
-
-        stop = np.nan
-        target1 = np.nan
-        target2 = np.nan
-        target3 = np.nan
-
-    # =====================
-    # 市场环境
-    # =====================
-
-    if (
-        trend60 == "BULL"
-        and
-        trend15 == "BULL"
-    ):
-
-        regime = "STRONG_UPTREND"
-
-    elif (
-        trend60 == "BEAR"
-        and
-        trend15 == "BEAR"
-    ):
-
-        regime = "STRONG_DOWNTREND"
-
-    else:
-
-        regime = "TRANSITION"
-
-    # =====================
-    # 强度
-    # =====================
-
-    if score >= 85:
-
-        strength = "VERY_STRONG"
-
-    elif score >= 75:
-
-        strength = "STRONG"
-
-    elif score >= 65:
-
-        strength = "NORMAL"
-
-    else:
-
-        strength = "WEAK"
-
-    leg = detect_leg(
-        f5,
-        side
-        if side != "WAIT"
-        else "LONG"
-    )
-
-    return {
-
-        "side": side,
-
-        "score": int(score),
-
-        "entry": entry,
-
-        "stop": stop,
-
-        "target1": target1,
-
-        "target2": target2,
-
-        "target3": target3,
-
-        "trend5": trend5,
-
-        "trend15": trend15,
-
-        "trend60": trend60,
-
-        "regime": regime,
-
-        "strength": strength,
-
-        "leg": leg,
-
-        "rsi": row["RSI"],
-
-        "adx": row["ADX"],
-
-        "rvol": row["RVOL"],
-
-        "atr": row["ATR"],
-
-        "vwap": row["VWAP"],
-
-        "reasons": reasons
-    }
-
-
-# =========================
-# 股票选择
-# =========================
-
-default_symbols = [
-    "NVDA",
-    "TSLA",
-    "AMZN",
-    "GOOGL",
-    "ORCL",
-    "META",
-    "AMD",
-    "MSFT",
-    "AAPL",
-    "TSM"
-]
-
-symbol = st.selectbox(
-    "选择股票",
-    default_symbols
-)
-
-custom = st.text_input(
-    "或者输入其他美股代码"
-)
-
-if custom:
-
-    symbol = (
-        custom
-        .upper()
-        .strip()
-    )
-
-
-# =========================
-# 风险参数
-# =========================
-
-with st.expander(
-    "⚙️ 资金与风险设置"
-):
-
-    account = st.number_input(
-        "账户资金 $",
-        min_value=1000.0,
-        value=20000.0,
-        step=1000.0
-    )
-
-    risk_pct = (
-        st.slider(
-            "单笔最大风险 %",
-            0.1,
-            2.0,
-            0.5,
-            0.1
-        )
-        / 100
-    )
-
-
-# =========================
-# 获取数据
-# =========================
-
-with st.spinner(
-    f"正在分析 {symbol} ..."
-):
-
-    df = get_market_data(
-        symbol
-    )
-
+        stop=max(float(f5["High"].tail(8).max()),entry+1.35*a); risk=stop-entry
+        t1,t2,t3=entry-risk,entry-2*risk,entry-3*risk
+
+    return dict(side=side,status=status,score=score,long_score=L,short_score=S,entry=entry,stop=stop,
+                t1=t1,t2=t2,t3=t3,trend5=t5,trend15=t15,trend60=t60,
+                rsi=float(r["RSI"]),rvol=float(r["RVOL"]),vwap=float(r["VWAP"]),
+                reasons=(lr if side=="LONG" else sr))
+
+def label(sig):
+    if sig["status"]=="CONFIRMED": return "🟢 强做多确认" if sig["side"]=="LONG" else "🔴 强做空确认"
+    if sig["status"]=="WAIT_CONFIRM": return "🟡 多头等待确认" if sig["side"]=="LONG" else "🟡 空头等待确认"
+    if sig["status"]=="WATCH": return "👀 多头观察" if sig["side"]=="LONG" else "👀 空头观察"
+    return "⚪ 禁止交易 / 信号冲突"
+
+symbol=st.selectbox("选择股票",["NVDA","TSLA","AMZN","GOOGL","ORCL","META","AMD","MSFT","AAPL","TSM"])
+custom=st.text_input("或者输入其他美股代码")
+if custom.strip(): symbol=custom.strip().upper()
+
+with st.expander("⚙️ 资金与风险设置"):
+    account=st.number_input("账户资金 $",min_value=1000.0,value=20000.0,step=1000.0)
+    risk_pct=st.slider("单笔最大风险 %",0.1,1.5,0.5,0.1)/100
+
+if st.button("🔄 立即刷新"):
+    st.cache_data.clear(); st.rerun()
+
+with st.spinner(f"正在分析 {symbol} ..."):
+    df=load_symbol(symbol); mbias,mreason=market_bias()
 
 if df is None:
+    st.error("无法获取行情，请稍后再试。"); st.stop()
 
-    st.error(
-        "无法获取行情，请检查股票代码。"
-    )
+sig=evaluate(df,mbias)
+if sig is None:
+    st.warning("数据不足。"); st.stop()
 
-    st.stop()
+txt=label(sig)
+if sig["status"]=="CONFIRMED" and sig["side"]=="LONG": st.success(f"{txt} ｜ {symbol}")
+elif sig["status"]=="CONFIRMED" and sig["side"]=="SHORT": st.error(f"{txt} ｜ {symbol}")
+elif sig["status"] in ["WAIT_CONFIRM","WATCH"]: st.warning(f"{txt} ｜ {symbol}")
+else: st.info(f"{txt} ｜ {symbol}")
 
+c1,c2=st.columns(2); c1.metric("信号评分",f"{sig['score']}/100"); c2.metric("当前价格",f"${sig['entry']:.2f}")
+c1,c2=st.columns(2); c1.metric("多头分",sig["long_score"]); c2.metric("空头分",sig["short_score"])
+st.caption(f"SPY/QQQ：{mbias} ｜ {mreason}")
 
-signal = calculate_signal(
-    df
-)
+st.subheader("📊 多周期")
+c1,c2,c3=st.columns(3); c1.metric("5m",sig["trend5"]); c2.metric("15m",sig["trend15"]); c3.metric("60m",sig["trend60"])
 
+st.subheader("🎯 风控")
+c1,c2=st.columns(2); c1.metric("入场参考",f"${sig['entry']:.2f}"); c2.metric("结构止损",f"${sig['stop']:.2f}")
+c1,c2,c3=st.columns(3); c1.metric("1R",f"${sig['t1']:.2f}"); c2.metric("2R",f"${sig['t2']:.2f}"); c3.metric("3R",f"${sig['t3']:.2f}")
 
-if signal is None:
+per_share=abs(sig["entry"]-sig["stop"]); risk_money=account*risk_pct
+shares=int(risk_money//per_share) if per_share>0 else 0
+st.metric("建议股数",shares)
 
-    st.warning(
-        "历史数据不足，暂时无法计算。"
-    )
+st.subheader("🔬 技术状态")
+c1,c2=st.columns(2); c1.metric("RSI",f"{sig['rsi']:.1f}"); c2.metric("RVOL",f"{sig['rvol']:.2f}")
+st.metric("VWAP",f"${sig['vwap']:.2f}")
 
-    st.stop()
+st.subheader("🧠 信号解释")
+for reason in sig["reasons"][:8]:
+    st.write("•",reason)
 
+st.subheader("📉 最近走势")
+st.line_chart(df.tail(120)[["Close"]])
 
-# =========================
-# 主信号显示
-# =========================
-
-side = signal["side"]
-
-
-if side == "LONG":
-
-    st.success(
-        f"🟢 做多确认 | {symbol}"
-    )
-
-elif side == "SHORT":
-
-    st.error(
-        f"🔴 做空确认 | {symbol}"
-    )
-
-else:
-
-    st.warning(
-        f"🟡 暂不交易 | {symbol}"
-    )
-
-
-# =========================
-# 第一排
-# =========================
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric(
-    "信号评分",
-    f"{signal['score']}/100"
-)
-
-c2.metric(
-    "当前价格",
-    f"${signal['entry']:.2f}"
-)
-
-c3.metric(
-    "信号强度",
-    signal["strength"]
-)
-
-c4.metric(
-    "市场环境",
-    signal["regime"]
-)
-
-
-# =========================
-# 周期
-# =========================
-
-st.subheader(
-    "📊 多周期趋势"
-)
-
-c1, c2, c3 = st.columns(3)
-
-c1.metric(
-    "5分钟",
-    signal["trend5"]
-)
-
-c2.metric(
-    "15分钟",
-    signal["trend15"]
-)
-
-c3.metric(
-    "60分钟",
-    signal["trend60"]
-)
-
-
-# =========================
-# 风控
-# =========================
-
-if side != "WAIT":
-
-    st.subheader(
-        "🎯 入场与风险控制"
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "入场参考",
-        f"${signal['entry']:.2f}"
-    )
-
-    c2.metric(
-        "结构止损",
-        f"${signal['stop']:.2f}"
-    )
-
-    c3.metric(
-        "1R",
-        f"${signal['target1']:.2f}"
-    )
-
-    c4.metric(
-        "2R",
-        f"${signal['target2']:.2f}"
-    )
-
-    c1, c2 = st.columns(2)
-
-    c1.metric(
-        "3R",
-        f"${signal['target3']:.2f}"
-    )
-
-    c2.metric(
-        "当前推动",
-        signal["leg"]
-    )
-
-
-# =========================
-# 自动仓位
-# =========================
-
-if side != "WAIT":
-
-    per_share_risk = abs(
-        signal["entry"]
-        -
-        signal["stop"]
-    )
-
-    risk_money = (
-        account
-        *
-        risk_pct
-    )
-
-    shares_by_risk = int(
-        risk_money
-        /
-        per_share_risk
-    )
-
-    max_notional = (
-        account
-        *
-        0.25
-    )
-
-    shares_by_notional = int(
-        max_notional
-        /
-        signal["entry"]
-    )
-
-    shares = max(
-        0,
-        min(
-            shares_by_risk,
-            shares_by_notional
-        )
-    )
-
-    st.subheader(
-        "💰 自动仓位管理"
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "建议股数",
-        shares
-    )
-
-    c2.metric(
-        "预计风险",
-        f"${shares * per_share_risk:.2f}"
-    )
-
-    c3.metric(
-        "预计仓位",
-        f"${shares * signal['entry']:.2f}"
-    )
-
-
-# =========================
-# 技术状态
-# =========================
-
-st.subheader(
-    "🔬 技术状态"
-)
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric(
-    "RSI",
-    f"{signal['rsi']:.1f}"
-)
-
-c2.metric(
-    "ADX",
-    f"{signal['adx']:.1f}"
-)
-
-c3.metric(
-    "RVOL",
-    f"{signal['rvol']:.2f}"
-)
-
-c4.metric(
-    "VWAP",
-    f"${signal['vwap']:.2f}"
-)
-
-
-# =========================
-# 信号原因
-# =========================
-
-st.subheader(
-    "🧠 信号解释"
-)
-
-if len(signal["reasons"]) == 0:
-
-    st.write(
-        "当前没有足够强的确认条件。"
-    )
-
-else:
-
-    for reason in signal["reasons"]:
-
-        st.write(
-            "•",
-            reason
-        )
-
-
-# =========================
-# K线趋势图
-# =========================
-
-st.subheader(
-    "📉 最近走势"
-)
-
-chart_df = df.tail(
-    100
-)[["Close"]]
-
-st.line_chart(
-    chart_df
-)
-
-
-# =========================
-# 更新时间
-# =========================
-
-st.caption(
-    f"最后刷新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-)
-
-st.caption(
-    "⚠️ 量化模型仅用于研究和辅助判断，不构成投资建议。Yahoo Finance 行情可能存在延迟。"
-)
+st.caption("V2：≥85强确认；78–84等待确认；65–77观察；<65禁止交易。")
+st.caption("⚠️ 仅用于研究与辅助判断，不构成投资建议。Yahoo Finance 行情可能存在延迟。")
